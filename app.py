@@ -1,9 +1,12 @@
 """
-Air Quality Classification App (v2)
+Air Quality Classification App (v3)
 --------------------------------------
-Adds:
-  - A probability bar chart (all 6 classes) alongside the top prediction
-  - General UI polish: padding, framed sections, consistent styling
+Adds, on top of v2:
+  - Card-styled batch prediction tab matching the Manual Entry tab's look
+  - Color-coded result rows in the batch table (by predicted AQI category)
+  - A summary bar chart showing the distribution of predicted categories
+  - A colored result "chip" behind the manual-entry prediction
+  - Clear/reset buttons on both tabs
 
 Expects a `models/` folder (next to this file) containing the artifacts
 saved from the notebook via joblib:
@@ -17,6 +20,7 @@ import pandas as pd
 import joblib
 import os
 from datetime import datetime
+from collections import Counter
 
 import matplotlib
 matplotlib.use('TkAgg')
@@ -35,10 +39,8 @@ pollutant_cols = joblib.load(os.path.join(MODEL_DIR, 'pollutant_columns.pkl'))
 city_list = joblib.load(os.path.join(MODEL_DIR, 'city_list.pkl'))
 season_list = joblib.load(os.path.join(MODEL_DIR, 'season_list.pkl'))
 
-# Fixed left-to-right severity order for the chart, regardless of alphabetical
-# order from LabelEncoder — this reads more naturally to a viewer.
 AQI_ORDER = ['Good', 'Satisfactory', 'Moderate', 'Poor', 'Very Poor', 'Severe']
-AQI_ORDER = [c for c in AQI_ORDER if c in le.classes_]  # keep only classes actually present
+AQI_ORDER = [c for c in AQI_ORDER if c in le.classes_]
 
 AQI_COLORS = {
     'Good': '#2ecc71',
@@ -49,9 +51,21 @@ AQI_COLORS = {
     'Severe': '#7d0f0f',
 }
 
+# Lighter tint of each color, used as a row background in the results table
+# so the text stays readable while still signalling severity.
+AQI_ROW_TINTS = {
+    'Good': '#eafaf1',
+    'Satisfactory': '#f2f9e8',
+    'Moderate': '#fef9e7',
+    'Poor': '#fdf0e2',
+    'Very Poor': '#fdecea',
+    'Severe': '#f6dede',
+}
+
 BG_COLOR = '#f4f6f8'
 CARD_COLOR = '#ffffff'
 ACCENT_COLOR = '#2c3e50'
+MUTED_TEXT = '#7f8c8d'
 
 
 # ---------------------------------------------------------------------------
@@ -82,12 +96,10 @@ def build_feature_row(pollutant_values, city, month):
 
 
 def predict_single(pollutant_values, city, month):
-    """Returns (predicted_label, {class_label: probability, ...})"""
     X = build_feature_row(pollutant_values, city, month)
     proba = model.predict_proba(X)[0]
     pred_enc = proba.argmax()
     pred_label = le.inverse_transform([pred_enc])[0]
-
     proba_dict = {le.inverse_transform([i])[0]: p for i, p in enumerate(proba)}
     return pred_label, proba_dict
 
@@ -126,7 +138,7 @@ class AQIApp:
     def __init__(self, root):
         self.root = root
         root.title("Air Quality Classification App")
-        root.geometry("980x700")
+        root.geometry("1040x740")
         root.configure(bg=BG_COLOR)
 
         style = ttk.Style()
@@ -137,10 +149,16 @@ class AQIApp:
         style.configure('Card.TFrame', background=CARD_COLOR)
         style.configure('TLabel', background=BG_COLOR, font=('Segoe UI', 10))
         style.configure('Card.TLabel', background=CARD_COLOR, font=('Segoe UI', 10))
+        style.configure('Muted.Card.TLabel', background=CARD_COLOR, font=('Segoe UI', 9), foreground=MUTED_TEXT)
         style.configure('Header.TLabel', background=BG_COLOR, font=('Segoe UI', 15, 'bold'), foreground=ACCENT_COLOR)
+        style.configure('Header.Card.TLabel', background=CARD_COLOR, font=('Segoe UI', 14, 'bold'), foreground=ACCENT_COLOR)
         style.configure('TButton', font=('Segoe UI', 10, 'bold'), padding=8)
+        style.configure('Secondary.TButton', font=('Segoe UI', 9))
         style.configure('TEntry', padding=4)
         style.configure('TCombobox', padding=4)
+
+        style.configure('Results.Treeview', font=('Segoe UI', 9), rowheight=26)
+        style.configure('Results.Treeview.Heading', font=('Segoe UI', 9, 'bold'))
 
         notebook = ttk.Notebook(root)
         notebook.pack(fill='both', expand=True, padx=12, pady=12)
@@ -158,11 +176,10 @@ class AQIApp:
         outer = ttk.Frame(self.manual_tab, padding=15)
         outer.pack(fill='both', expand=True)
 
-        # Left card: inputs
         left = ttk.Frame(outer, style='Card.TFrame', padding=20)
         left.grid(row=0, column=0, sticky='n', padx=(0, 15))
 
-        ttk.Label(left, text="Pollutant Readings", style='Header.TLabel', background=CARD_COLOR).grid(
+        ttk.Label(left, text="Pollutant Readings", style='Header.Card.TLabel').grid(
             row=0, column=0, columnspan=2, pady=(0, 15), sticky='w')
 
         self.entries = {}
@@ -185,19 +202,25 @@ class AQIApp:
         ttk.Combobox(left, textvariable=self.month_var, values=[str(m) for m in range(1, 13)],
                      state='readonly', width=14).grid(row=row_offset + 1, column=1, pady=5, padx=(10, 0))
 
-        ttk.Button(left, text="Predict AQI Category", command=self.on_predict_manual).grid(
-            row=row_offset + 2, column=0, columnspan=2, pady=(20, 0), sticky='ew')
+        btn_row = ttk.Frame(left, style='Card.TFrame')
+        btn_row.grid(row=row_offset + 2, column=0, columnspan=2, pady=(20, 0), sticky='ew')
+        ttk.Button(btn_row, text="Predict AQI Category", command=self.on_predict_manual).pack(
+            side='left', fill='x', expand=True)
+        ttk.Button(btn_row, text="Clear", style='Secondary.TButton', command=self.on_clear_manual).pack(
+            side='left', padx=(8, 0))
 
-        # Right card: result + chart
+        # Right card: result chip + chart
         right = ttk.Frame(outer, style='Card.TFrame', padding=20)
         right.grid(row=0, column=1, sticky='n')
 
-        ttk.Label(right, text="Prediction", style='Header.TLabel', background=CARD_COLOR).pack(
-            anchor='w', pady=(0, 10))
+        ttk.Label(right, text="Prediction", style='Header.Card.TLabel').pack(anchor='w', pady=(0, 10))
 
-        self.result_label = tk.Label(right, text="Enter readings and click Predict",
-                                      font=('Segoe UI', 18, 'bold'), bg=CARD_COLOR, fg='#7f8c8d')
-        self.result_label.pack(anchor='w', pady=(0, 15))
+        self.result_chip = tk.Frame(right, bg='#ecf0f1', height=56)
+        self.result_chip.pack(fill='x', pady=(0, 15))
+        self.result_chip.pack_propagate(False)
+        self.result_label = tk.Label(self.result_chip, text="Enter readings and click Predict",
+                                      font=('Segoe UI', 15, 'bold'), bg='#ecf0f1', fg=MUTED_TEXT)
+        self.result_label.pack(expand=True, fill='both')
 
         self.fig, self.ax = plt.subplots(figsize=(5, 3.2), dpi=100)
         self.fig.patch.set_facecolor(CARD_COLOR)
@@ -216,6 +239,13 @@ class AQIApp:
         self.fig.tight_layout()
         self.canvas.draw()
 
+    def on_clear_manual(self):
+        for entry in self.entries.values():
+            entry.delete(0, tk.END)
+        self.result_chip.configure(bg='#ecf0f1')
+        self.result_label.configure(text="Enter readings and click Predict", bg='#ecf0f1', fg=MUTED_TEXT)
+        self.draw_empty_chart()
+
     def on_predict_manual(self):
         try:
             pollutant_values = {}
@@ -230,10 +260,11 @@ class AQIApp:
             confidence = proba_dict[pred_label]
 
             color = AQI_COLORS.get(pred_label, ACCENT_COLOR)
-            self.result_label.config(
-                text=f"{pred_label}  ({confidence * 100:.1f}% confidence)", fg=color)
+            self.result_chip.configure(bg=color)
+            self.result_label.configure(
+                text=f"{pred_label}   \u2014   {confidence * 100:.1f}% confidence",
+                bg=color, fg='#ffffff')
 
-            # Draw probability bars for every class, in fixed severity order
             probs = [proba_dict.get(cls, 0.0) for cls in AQI_ORDER]
             colors = [AQI_COLORS.get(cls, '#95a5a6') for cls in AQI_ORDER]
 
@@ -256,27 +287,71 @@ class AQIApp:
 
     # -- Batch CSV tab --------------------------------------------------------
     def build_batch_tab(self):
-        outer = ttk.Frame(self.batch_tab, padding=20)
+        outer = ttk.Frame(self.batch_tab, padding=15)
         outer.pack(fill='both', expand=True)
 
-        ttk.Label(outer, text="Batch Prediction from CSV", style='Header.TLabel').pack(anchor='w', pady=(0, 5))
-        ttk.Label(outer, text="Required columns: City, Date (or Month), " + ", ".join(pollutant_cols),
-                  wraplength=800, justify='left').pack(anchor='w', pady=(0, 15))
+        # Top card: upload controls + requirements
+        top_card = ttk.Frame(outer, style='Card.TFrame', padding=20)
+        top_card.pack(fill='x', pady=(0, 15))
 
-        btn_frame = ttk.Frame(outer)
-        btn_frame.pack(anchor='w', pady=5)
+        ttk.Label(top_card, text="Batch Prediction from CSV", style='Header.Card.TLabel').pack(anchor='w')
+        ttk.Label(top_card, text="Required columns: City, Date (or Month), " + ", ".join(pollutant_cols),
+                  style='Muted.Card.TLabel', wraplength=900, justify='left').pack(anchor='w', pady=(4, 15))
+
+        btn_frame = ttk.Frame(top_card, style='Card.TFrame')
+        btn_frame.pack(anchor='w')
         ttk.Button(btn_frame, text="Upload CSV", command=self.on_upload_csv).pack(side='left', padx=(0, 8))
         self.export_btn = ttk.Button(btn_frame, text="Export Results", command=self.on_export_csv, state='disabled')
-        self.export_btn.pack(side='left')
+        self.export_btn.pack(side='left', padx=(0, 8))
+        self.clear_btn = ttk.Button(btn_frame, text="Clear", style='Secondary.TButton',
+                                     command=self.on_clear_batch, state='disabled')
+        self.clear_btn.pack(side='left')
+
+        # Middle: results table (card) + summary chart (card), side by side
+        middle = ttk.Frame(outer)
+        middle.pack(fill='both', expand=True)
+
+        table_card = ttk.Frame(middle, style='Card.TFrame', padding=15)
+        table_card.pack(side='left', fill='both', expand=True, padx=(0, 15))
+
+        ttk.Label(table_card, text="Predictions", style='Card.TLabel', font=('Segoe UI', 11, 'bold')).pack(
+            anchor='w', pady=(0, 8))
 
         columns = ['City', 'Date', 'PM2.5', 'PM10', 'Predicted_AQI_Bucket']
-        self.tree = ttk.Treeview(outer, columns=columns, show='headings', height=16)
+        self.tree = ttk.Treeview(table_card, columns=columns, show='headings', height=16, style='Results.Treeview')
         for col in columns:
             self.tree.heading(col, text=col)
-            self.tree.column(col, width=140, anchor='center')
-        self.tree.pack(fill='both', expand=True, pady=(15, 0))
+            self.tree.column(col, width=120, anchor='center')
+        self.tree.pack(fill='both', expand=True)
+
+        for cls, tint in AQI_ROW_TINTS.items():
+            self.tree.tag_configure(cls, background=tint)
+
+        # Summary card: class distribution chart
+        summary_card = ttk.Frame(middle, style='Card.TFrame', padding=15, width=280)
+        summary_card.pack(side='left', fill='y')
+        summary_card.pack_propagate(False)
+
+        ttk.Label(summary_card, text="Category Breakdown", style='Card.TLabel', font=('Segoe UI', 11, 'bold')).pack(
+            anchor='w', pady=(0, 8))
+
+        self.summary_fig, self.summary_ax = plt.subplots(figsize=(3.0, 4.2), dpi=100)
+        self.summary_fig.patch.set_facecolor(CARD_COLOR)
+        self.summary_canvas = FigureCanvasTkAgg(self.summary_fig, master=summary_card)
+        self.summary_canvas.get_tk_widget().pack(fill='both', expand=True)
+        self.draw_empty_summary()
+
+        self.summary_text = ttk.Label(summary_card, text="Upload a CSV to see results",
+                                       style='Muted.Card.TLabel', wraplength=240, justify='left')
+        self.summary_text.pack(anchor='w', pady=(8, 0))
 
         self.batch_result_df = None
+
+    def draw_empty_summary(self):
+        self.summary_ax.clear()
+        self.summary_ax.axis('off')
+        self.summary_fig.tight_layout()
+        self.summary_canvas.draw()
 
     def on_upload_csv(self):
         filepath = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
@@ -287,8 +362,9 @@ class AQIApp:
             result_df = predict_batch(df_input)
             self.batch_result_df = result_df
             self.populate_tree(result_df)
+            self.draw_summary(result_df)
             self.export_btn.config(state='normal')
-            messagebox.showinfo("Success", f"Predicted AQI category for {len(result_df)} rows.")
+            self.clear_btn.config(state='normal')
         except Exception as e:
             messagebox.showerror("Error processing CSV", str(e))
 
@@ -303,7 +379,41 @@ class AQIApp:
 
         for _, row in df_result.iterrows():
             values = [row.get(c, '') for c in display_cols]
-            self.tree.insert('', 'end', values=values)
+            cls = row.get('Predicted_AQI_Bucket', '')
+            self.tree.insert('', 'end', values=values, tags=(cls,))
+
+    def draw_summary(self, df_result):
+        counts = Counter(df_result['Predicted_AQI_Bucket'])
+        labels = [c for c in AQI_ORDER if counts.get(c, 0) > 0]
+        values = [counts[c] for c in labels]
+        colors = [AQI_COLORS.get(c, '#95a5a6') for c in labels]
+
+        self.summary_ax.clear()
+        self.summary_ax.axis('on')
+        bars = self.summary_ax.barh(labels, values, color=colors)
+        self.summary_ax.invert_yaxis()
+        self.summary_ax.set_xlabel('Count')
+        self.summary_ax.set_facecolor(CARD_COLOR)
+        for bar, v in zip(bars, values):
+            self.summary_ax.text(v + max(values) * 0.02, bar.get_y() + bar.get_height() / 2,
+                                  str(v), va='center', fontsize=8)
+        self.summary_fig.tight_layout()
+        self.summary_canvas.draw()
+
+        total = len(df_result)
+        top_class = max(counts, key=counts.get)
+        self.summary_text.configure(
+            text=f"{total} rows classified.\nMost common: {top_class} ({counts[top_class]} rows, "
+                 f"{counts[top_class]/total*100:.0f}%)")
+
+    def on_clear_batch(self):
+        for row in self.tree.get_children():
+            self.tree.delete(row)
+        self.batch_result_df = None
+        self.export_btn.config(state='disabled')
+        self.clear_btn.config(state='disabled')
+        self.draw_empty_summary()
+        self.summary_text.configure(text="Upload a CSV to see results")
 
     def on_export_csv(self):
         if self.batch_result_df is None:
