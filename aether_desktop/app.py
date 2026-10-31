@@ -17,7 +17,7 @@ Views
 Expects a `models/` folder next to this file containing the joblib artifacts
 saved from the notebook:
     xgb_aqi_model.pkl, label_encoder.pkl, feature_columns.pkl,
-    pollutant_columns.pkl, city_list.pkl, season_list.pkl
+    pollutant_columns.pkl, city_list.pkl, season_list.pkl, input_ranges.pkl (optional)
 and a `fonts/` folder with the bundled Montserrat family. The desktop typography
 uses a clean sans-serif treatment to stay visually aligned with the Aether web app.
 """
@@ -267,6 +267,40 @@ class Engine:
         # predict_proba columns follow model.classes_ (encoded ints) -> labels
         enc = np.asarray(self.model.classes_, dtype=int)
         self.proba_labels = list(self.le.inverse_transform(enc))
+        # Optional training-distribution metadata; absence never affects prediction.
+        ranges_path = model_dir / "input_ranges.pkl"
+        self.input_ranges = joblib.load(ranges_path) if ranges_path.is_file() else {}
+
+    def warnings_for_reading(self, readings: dict) -> list[str]:
+        """Return soft distribution warnings without changing classification."""
+        warnings = []
+        if not isinstance(self.input_ranges, dict):
+            return warnings
+        for pollutant, value in readings.items():
+            limits = self.input_ranges.get(pollutant)
+            if not isinstance(limits, dict):
+                continue
+            try:
+                numeric = float(value)
+                maximum = float(limits["max"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if numeric > maximum:
+                warnings.append(
+                    f"{pollutant} = {numeric:g} is above the highest value seen in training "
+                    f"({maximum:g}). Check the units; the prediction may be unreliable."
+                )
+        ozone = self.input_ranges.get("O3")
+        if isinstance(ozone, dict):
+            try:
+                if float(readings.get("O3", float("-inf"))) > float(ozone["p99"]):
+                    warnings.append(
+                        "Ozone is unusually high for the training data. The model is least "
+                        "reliable when ozone, rather than particulate matter, drives the AQI."
+                    )
+            except (KeyError, TypeError, ValueError):
+                pass
+        return warnings
 
     @staticmethod
     def season(month: int) -> str:
@@ -670,6 +704,10 @@ class SinglePage(QtWidgets.QWidget):
         fv.addSpacing(2)
         fv.addWidget(label("Daily averages. CO in mg/m\u00b3, all others in \u00b5g/m\u00b3.",
                            px=11, weight=W.Light, color=INK_SOFT))
+        fv.addWidget(label(
+            "Enter CO and O3 as daily averages. Official AQI uses 8-hour maxima for these two, "
+            "which run higher; entering 8-hour maxima will push the prediction up.",
+            px=11, weight=W.Light, color=INK_SOFT, wrap=True))
         fv.addSpacing(18)
 
         grid = QtWidgets.QGridLayout()
@@ -758,6 +796,12 @@ class SinglePage(QtWidgets.QWidget):
         fl.addSpacing(14)
         self.health = label("", px=14, weight=W.Light, color=INK, wrap=True)
         fl.addWidget(self.health)
+        self.range_warning = QtWidgets.QLabel()
+        self.range_warning.setObjectName("banner")
+        self.range_warning.setFont(mkfont(FONT_UI, 11, W.Medium))
+        self.range_warning.setWordWrap(True)
+        self.range_warning.hide()
+        fl.addWidget(self.range_warning)
         fl.addSpacing(10)
         self.borderline = label("", px=12, weight=W.Medium, color=WARN_INK, wrap=True)
         fl.addWidget(self.borderline)
@@ -820,6 +864,7 @@ class SinglePage(QtWidgets.QWidget):
             e.clear()
             self._clear_error(e)
         self.error.hide()
+        self.range_warning.hide()
         self.filled.hide()
         self.empty.show()
 
@@ -855,6 +900,9 @@ class SinglePage(QtWidgets.QWidget):
         self.cat_label.setStyleSheet(f"color:{color}; background:transparent;")
         self.meta.setText(f"{AQI_RANGE[cat]}   \u00b7   {conf * 100:.1f}% confidence")
         self.health.setText(AQI_HEALTH[cat])
+        range_warnings = self.engine.warnings_for_reading(vals)
+        self.range_warning.setText("  ".join(range_warnings))
+        self.range_warning.setVisible(bool(range_warnings))
 
         ranked = sorted(probs.items(), key=lambda kv: kv[1], reverse=True)
         runner, rp = ranked[1]
@@ -912,6 +960,10 @@ class BatchPage(QtWidgets.QWidget):
         btns.addLayout(row)
         head.addLayout(btns)
         root.addLayout(head)
+        root.addWidget(label(
+            "Enter CO and O3 as daily averages. Official AQI uses 8-hour maxima for these two, "
+            "which run higher; entering 8-hour maxima will push the prediction up.",
+            px=11, weight=W.Light, color=INK_SOFT, wrap=True))
 
         self.banner = QtWidgets.QLabel()
         self.banner.setObjectName("banner")
@@ -1025,6 +1077,12 @@ class BatchPage(QtWidgets.QWidget):
             if raw.empty or len(raw.columns) == 0:
                 raise ValueError("The file contains no data rows. Check that this is a CSV with a header row.")
             res = self.engine.predict_frame(raw)
+            for row_idx in res.index[res[PRED_COL] != SKIPPED]:
+                readings = {p: res.at[row_idx, p] for p in self.engine.pollutants}
+                advisory = self.engine.warnings_for_reading(readings)
+                if advisory:
+                    existing = str(res.at[row_idx, "Note"]) if "Note" in res.columns else ""
+                    res.at[row_idx, "Note"] = " ".join(x for x in (existing, " ".join(advisory)) if x)
         except Exception as ex:
             QtWidgets.QApplication.restoreOverrideCursor()
             self._banner(f"Couldn\u2019t process that file: {ex}", ok=False)
@@ -1033,7 +1091,7 @@ class BatchPage(QtWidgets.QWidget):
 
         self.result = res
         shown = [c for c in ("City", "Date", "Month") if c in res.columns] + [PRED_COL, "Confidence"] \
-                + self.engine.pollutants
+                + self.engine.pollutants + (["Note"] if "Note" in res.columns else [])
         self.model.set_frame(res, shown)
         pill = self.model.cols.index(PRED_COL)
         self.table.horizontalHeader().setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
@@ -1276,27 +1334,36 @@ class AboutPage(QtWidgets.QScrollArea):
             cv.addLayout(r)
         root.addWidget(c)
 
-        # limits
+        # Limitations and external evidence
         c = Card()
         cv = QtWidgets.QVBoxLayout(c)
         cv.setContentsMargins(30, 24, 30, 26)
         cv.setSpacing(10)
         cv.addWidget(label("Limitations", family=FONT_DISPLAY, px=19, weight=W.DemiBold))
-        for t in (
-            "Trained on daily city-level readings from Indian cities, 2015\u20132020. It has not been "
-            "validated for Pakistani cities or later years \u2014 outside that setting, treat results as illustrative.",
-            "Inputs must be daily averages. Hourly or instantaneous readings don\u2019t match the training data.",
-            "The two most severe categories are rare in the data (27 Severe days in the held-out test set), "
-            "so expect less certainty there.",
+        for text_line in (
+            "Trained on 20 Indian cities from 2015–2020. Held-out test accuracy was 82.7%, "
+            "with a macro F1 score of 0.79.",
+            "The model was trained where particulate matter drives almost every high-AQI day.",
             "This is a classifier, not a health advisory. For decisions that matter, use official monitoring.",
         ):
-            cv.addWidget(label("\u2014  " + t, px=13, weight=W.Light, wrap=True))
+            cv.addWidget(label("—  " + text_line, px=13, weight=W.Light, wrap=True))
         root.addWidget(c)
 
         c = Card()
         cv = QtWidgets.QVBoxLayout(c)
         cv.setContentsMargins(30, 24, 30, 26)
         cv.setSpacing(10)
+        cv.addWidget(label("External checks", family=FONT_DISPLAY, px=19, weight=W.DemiBold))
+        for text_line in (
+            "A related six-pollutant model scored about 83% on Pune (an unseen Indian city) "
+            "and about 71% on Beijing (an unseen country).",
+            "That related model was least reliable (about 56%) on days where ozone sets the AQI, "
+            "compared with about 83% on other days.",
+            "The model inside this app was not tested directly on external data.",
+        ):
+            cv.addWidget(label("—  " + text_line, px=13, weight=W.Light, wrap=True))
+        root.addWidget(c)
+
         cv.addWidget(label("Supported cities", family=FONT_DISPLAY, px=19, weight=W.DemiBold))
         cv.addWidget(label("  \u00b7  ".join(engine.cities), px=13, weight=W.Light, color=INK_SOFT, wrap=True))
         root.addWidget(c)

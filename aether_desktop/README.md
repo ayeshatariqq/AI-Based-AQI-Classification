@@ -24,7 +24,7 @@ If `py -3.11` is not found, install Python 3.11 from python.org and enable the P
 
 Open **Batch analysis**, click **Open CSV**, or drag a CSV file onto the batch page. Use **Template** to save a correctly shaped example and **Export** to save predictions. CSV headers are matched without regard to case/outer spaces, UTF-8 BOMs are handled, and comma/semicolon-delimited files are detected.
 
-Required columns: `City`, `Date` or `Month`, and all pollutant columns listed by the model. City names must be present in the model's supported city list; values must be numeric and non-negative. Invalid rows are marked **Skipped** with a reason instead of being silently classified.
+Required columns: `City`, `Date` or `Month`, and all pollutant columns listed by the model. City names must be present in the model's supported city list; values must be numeric and non-negative. Invalid rows are marked **Skipped** with a reason instead of being silently classified. When `models/input_ranges.pkl` is present, classified rows also receive non-blocking training-range advisories; these are retained in the exported CSV.
 
 Shortcuts: Ctrl+1..4 switch views · Ctrl+Enter analyze · Ctrl+O open CSV.
 
